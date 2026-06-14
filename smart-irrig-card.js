@@ -75,9 +75,11 @@ class SmartIrrigCard extends HTMLElement {
     this.attachShadow({ mode: 'open' });
     this._zones = [];
     this._tid   = null;
+    // Edit state : clé = sensorId, valeur = { mode, scheduleTime, scheduleDays, humidityThreshold, irrigationDuration }
     this._editingId   = null;
     this._pendingEdit = null;
     this._saving      = false;
+    this._saveError   = null;
   }
 
   connectedCallback() {
@@ -91,6 +93,7 @@ class SmartIrrigCard extends HTMLElement {
   set hass(hass) {
     this._hass = hass;
     this._updateZones();
+    // Ne pas écraser le formulaire si l'utilisateur est en train de taper
     const focused = this.shadowRoot.activeElement;
     if (focused && ['INPUT', 'SELECT', 'TEXTAREA'].includes(focused.tagName)) return;
     this._render();
@@ -117,6 +120,8 @@ class SmartIrrigCard extends HTMLElement {
     return Math.max(this._zones.length * 5, 2);
   }
 
+  // ── Données ──────────────────────────────────────────────────────────────
+
   _updateZones() {
     if (!this._hass) return;
 
@@ -137,23 +142,28 @@ class SmartIrrigCard extends HTMLElement {
           : base.replace(/_/g, ' ');
 
         return {
-          sensorId:           id,
-          buttonId:           `button.${base}_start_irrigation`,
-          volumeId:           `sensor.${base}_water_volume`,
+          sensorId:          id,
+          buttonId:          `button.${base}_start_irrigation`,
+          volumeId:          `sensor.${base}_water_volume`,
           displayName,
-          entryId:            st.attributes.entry_id ?? null,
-          mode:               st.attributes.activation_mode || 'manual',
-          nextIrrigation:     st.state,
-          scheduleTime:       st.attributes.schedule_time   ?? null,
-          scheduleDays:       st.attributes.schedule_days   ?? [],
-          scheduleDaysRaw:    st.attributes.schedule_days_raw ?? [],
-          humiditySensor:     st.attributes.humidity_sensor ?? null,
-          humidityThreshold:  st.attributes.humidity_threshold ?? 40,
+          entryId:           st.attributes.entry_id ?? null,
+          mode:              st.attributes.activation_mode || 'manual',
+          nextIrrigation:    st.state,
+          scheduleTime:      st.attributes.schedule_time   ?? null,
+          scheduleDays:      st.attributes.schedule_days   ?? [],
+          scheduleDaysRaw:   st.attributes.schedule_days_raw ?? [],
+          humiditySensor:    st.attributes.humidity_sensor ?? null,
+          humidityThreshold: st.attributes.humidity_threshold ?? 40,
           irrigationDuration: st.attributes.irrigation_duration ?? 300,
+          irrigating:         st.attributes.irrigating          ?? false,
+          pumpSwitches:       st.attributes.pump_switches       ?? [],
+          totalFlowRate:      st.attributes.total_flow_rate     ?? null,
         };
       })
       .sort((a, b) => a.displayName.localeCompare(b.displayName, 'fr'));
   }
+
+  // ── Formatage ────────────────────────────────────────────────────────────
 
   _formatNext(iso) {
     if (!iso || ['unavailable', 'unknown', 'none', 'null'].includes(iso)) {
@@ -188,16 +198,19 @@ class SmartIrrigCard extends HTMLElement {
     }
   }
 
+  // ── Actions ──────────────────────────────────────────────────────────────
+
   _startEdit(zone) {
     this._editingId = zone.sensorId;
     this._pendingEdit = {
-      mode:               zone.mode,
-      scheduleTime:       (zone.scheduleTime ?? '08:00').slice(0, 5),
-      scheduleDays:       [...zone.scheduleDaysRaw],
-      humidityThreshold:  zone.humidityThreshold,
+      mode:              zone.mode,
+      scheduleTime:      (zone.scheduleTime ?? '08:00').slice(0, 5),
+      scheduleDays:      [...zone.scheduleDaysRaw],
+      humidityThreshold: zone.humidityThreshold,
       irrigationDuration: zone.irrigationDuration,
     };
-    this._saving = false;
+    this._saving    = false;
+    this._saveError = null;
     this._render();
   }
 
@@ -205,15 +218,18 @@ class SmartIrrigCard extends HTMLElement {
     this._editingId   = null;
     this._pendingEdit = null;
     this._saving      = false;
+    this._saveError   = null;
     this._render();
   }
 
   async _saveEdit(zone) {
     if (!zone.entryId) {
-      alert('Impossible de sauvegarder : entry_id manquant. Mettez à jour smart-irriga-V2.');
+      this._saveError = "entry_id manquant — installez la dernière version de smart-irriga-V2 via HACS.";
+      this._render();
       return;
     }
-    this._saving = true;
+    this._saving    = true;
+    this._saveError = null;
     this._render();
 
     const ed = this._pendingEdit;
@@ -236,12 +252,16 @@ class SmartIrrigCard extends HTMLElement {
       await this._hass.callService(DOMAIN, SERVICE, serviceData);
       this._editingId   = null;
       this._pendingEdit = null;
+      this._saveError   = null;
     } catch (err) {
       console.error('smart-irrig-card: save failed', err);
+      this._saveError = `Erreur : service "${DOMAIN}.${SERVICE}" introuvable — vérifiez que smart-irriga-V2 est à jour.`;
     }
     this._saving = false;
     this._render();
   }
+
+  // ── Rendu ────────────────────────────────────────────────────────────────
 
   _render() {
     if (!this._hass || !this._config) return;
@@ -269,6 +289,7 @@ class SmartIrrigCard extends HTMLElement {
   }
 
   _bindEvents() {
+    // Déclenchement manuel
     this.shadowRoot.querySelectorAll('[data-trigger]').forEach(btn => {
       btn.addEventListener('click', () => {
         const eid = btn.dataset.trigger;
@@ -283,6 +304,7 @@ class SmartIrrigCard extends HTMLElement {
       });
     });
 
+    // Boutons modifier / annuler / sauvegarder
     this.shadowRoot.querySelectorAll('[data-edit]').forEach(btn => {
       btn.addEventListener('click', () => {
         const z = this._zones.find(z => z.sensorId === btn.dataset.edit);
@@ -301,6 +323,7 @@ class SmartIrrigCard extends HTMLElement {
       });
     });
 
+    // Formulaire d'édition — sélecteur de mode
     this.shadowRoot.querySelectorAll('[data-mode-btn]').forEach(btn => {
       btn.addEventListener('click', () => {
         if (this._pendingEdit) {
@@ -310,6 +333,7 @@ class SmartIrrigCard extends HTMLElement {
       });
     });
 
+    // Pastilles jours (édition)
     this.shadowRoot.querySelectorAll('[data-day-toggle]').forEach(dot => {
       dot.addEventListener('click', () => {
         if (!this._pendingEdit) return;
@@ -322,16 +346,43 @@ class SmartIrrigCard extends HTMLElement {
       });
     });
 
+    // Inputs directs
     const bindInput = (sel, field, transform = v => v) => {
       const el = this.shadowRoot.querySelector(sel);
       if (el) el.addEventListener('input', () => {
         if (this._pendingEdit) this._pendingEdit[field] = transform(el.value);
       });
     };
-    bindInput('#edit-time',     'scheduleTime');
-    bindInput('#edit-humidity', 'humidityThreshold', Number);
-    bindInput('#edit-duration', 'irrigationDuration', Number);
+    bindInput('#edit-time', 'scheduleTime');
+
+    // Humidité : mise à jour du % affiché en direct
+    const humEl  = this.shadowRoot.querySelector('#edit-humidity');
+    const humVal = this.shadowRoot.querySelector('.range-val');
+    if (humEl) {
+      humEl.addEventListener('input', () => {
+        if (!this._pendingEdit) return;
+        this._pendingEdit.humidityThreshold = Number(humEl.value);
+        if (humVal) humVal.textContent = humEl.value + '%';
+      });
+    }
+
+    // Durée : mise à jour + recalcul volume en direct
+    const durEl  = this.shadowRoot.querySelector('#edit-duration');
+    const volHint = this.shadowRoot.querySelector('#vol-hint');
+    const editingZone = this._zones.find(z => z.sensorId === this._editingId);
+    if (durEl) {
+      durEl.addEventListener('input', () => {
+        if (!this._pendingEdit) return;
+        this._pendingEdit.irrigationDuration = Number(durEl.value);
+        if (volHint && editingZone && editingZone.totalFlowRate !== null) {
+          const v = Math.round(editingZone.totalFlowRate * Number(durEl.value));
+          volHint.textContent = '≈ ' + (v >= 1000 ? (v / 1000).toFixed(1) + ' L' : v + ' mL');
+        }
+      });
+    }
   }
+
+  // ── Templates ────────────────────────────────────────────────────────────
 
   _tplEmpty() {
     return `
@@ -352,22 +403,22 @@ class SmartIrrigCard extends HTMLElement {
     const canEdit   = !!z.entryId;
 
     return `
-      <div class="zone-card${isEditing ? ' editing' : ''}">
+      <div class="zone-card${isEditing ? ' editing' : ''}${z.irrigating ? ' pumping' : ''}">
         <div class="zone-head">
           <div class="zone-name">
             <ha-icon icon="mdi:sprinkler-variant"></ha-icon>
             <span>${z.displayName}</span>
           </div>
           <div style="display:flex;align-items:center;gap:8px">
+            ${z.irrigating ? `<span class="irrigating-badge"><ha-icon icon="mdi:water-pump"></ha-icon> Arrosage</span>` : ''}
             <div class="mode-badge ${mc.css}">
               <ha-icon icon="${mc.icon}"></ha-icon>
               <span>${mc.label}</span>
             </div>
             ${!isEditing ? `
-            <button class="icon-btn${canEdit ? '' : ' disabled'}"
+            <button class="icon-btn${canEdit ? '' : ' warn'}"
               data-edit="${z.sensorId}"
-              title="${canEdit ? 'Modifier la planification' : 'Mettez à jour smart-irriga-V2 pour activer l\'édition'}"
-              ${canEdit ? '' : 'disabled'}>
+              title="${canEdit ? 'Modifier la planification' : 'Éditer (mise à jour smart-irriga-V2 requise)'}">
               <ha-icon icon="mdi:pencil"></ha-icon>
             </button>` : ''}
           </div>
@@ -380,15 +431,11 @@ class SmartIrrigCard extends HTMLElement {
   _tplZoneBody(z, next, btn, vol, btnDis) {
     return `
       <div class="zone-body">
-        ${z.mode === 'schedule' ? this._tplSchedule(z) : ''}
+        ${z.mode === 'schedule' ? this._tplSchedule(z, next) : ''}
         ${z.mode === 'humidity' ? this._tplHumidity(z) : ''}
-        ${z.mode === 'manual'   ? this._tplManual()    : ''}
+        ${z.mode === 'manual'   ? this._tplManual(z)   : ''}
 
-        <div class="info-row${next.urgent ? ' urgent' : ''}">
-          <ha-icon icon="mdi:calendar-clock"></ha-icon>
-          <span>Prochain arrosage</span>
-          <strong>${next.text}</strong>
-        </div>
+        ${this._tplPumpStatus(z)}
 
         ${vol && vol.state !== 'unavailable' ? `
         <div class="info-row">
@@ -405,9 +452,24 @@ class SmartIrrigCard extends HTMLElement {
       </div>`;
   }
 
+  _tplPumpStatus(z) {
+    if (!z.pumpSwitches.length) return '';
+    const chips = z.pumpSwitches.map((sw) => {
+      const st   = this._hass.states[sw];
+      const on   = st && st.state === 'on';
+      const name = (st && st.attributes.friendly_name) || sw;
+      return `<div class="pump-chip${on ? ' on' : ''}" title="${sw}">
+        <ha-icon icon="${on ? 'mdi:pump' : 'mdi:pump-off'}"></ha-icon>
+        ${name}
+      </div>`;
+    }).join('');
+    return `<div class="pump-row">${chips}</div>`;
+  }
+
   _tplEditForm(z) {
     const ed = this._pendingEdit;
     if (!ed) return '';
+    const canSave = !!z.entryId;
 
     return `
       <div class="edit-form">
@@ -415,6 +477,20 @@ class SmartIrrigCard extends HTMLElement {
           <ha-icon icon="mdi:cog"></ha-icon> Modifier la planification
         </div>
 
+        ${!canSave ? `
+        <div class="edit-warn">
+          <ha-icon icon="mdi:alert-circle-outline"></ha-icon>
+          <div><strong>Mise à jour requise</strong><br>
+          <small>Installez la dernière version de <em>smart-irriga-V2</em> via HACS pour activer la sauvegarde.</small></div>
+        </div>` : ''}
+
+        ${this._saveError ? `
+        <div class="edit-error">
+          <ha-icon icon="mdi:alert-circle"></ha-icon>
+          <span>${this._saveError}</span>
+        </div>` : ''}
+
+        <!-- Sélecteur de mode -->
         <div class="field-row">
           <label class="field-label">Mode</label>
           <div class="mode-selector">
@@ -426,13 +502,20 @@ class SmartIrrigCard extends HTMLElement {
           </div>
         </div>
 
+        <!-- Durée (tous modes) -->
         <div class="field-row">
           <label class="field-label" for="edit-duration">Durée (secondes)</label>
           <input type="number" id="edit-duration" class="field-input"
-            min="10" max="3600" step="10"
+            min="1" max="3600" step="1"
             value="${ed.irrigationDuration}" />
+          ${z.totalFlowRate !== null ? `
+          <span class="vol-hint" id="vol-hint">≈ ${(() => {
+            const v = Math.round(z.totalFlowRate * ed.irrigationDuration);
+            return v >= 1000 ? (v / 1000).toFixed(1) + ' L' : v + ' mL';
+          })()}</span>` : ''}
         </div>
 
+        <!-- Options planification -->
         ${ed.mode === 'schedule' ? `
         <div class="field-row">
           <label class="field-label" for="edit-time">Heure</label>
@@ -450,6 +533,7 @@ class SmartIrrigCard extends HTMLElement {
           </div>
         </div>` : ''}
 
+        <!-- Options humidité -->
         ${ed.mode === 'humidity' ? `
         <div class="field-row">
           <label class="field-label" for="edit-humidity">Seuil humidité (%)</label>
@@ -461,12 +545,13 @@ class SmartIrrigCard extends HTMLElement {
           </div>
         </div>` : ''}
 
+        <!-- Boutons -->
         <div class="edit-actions">
           <button class="btn-cancel" data-cancel="${z.sensorId}">
             <ha-icon icon="mdi:close"></ha-icon> Annuler
           </button>
           <button class="btn-save${this._saving ? ' saving' : ''}" data-save="${z.sensorId}"
-            ${this._saving ? 'disabled' : ''}>
+            ${(this._saving || !canSave) ? 'disabled' : ''}>
             <ha-icon icon="${this._saving ? 'mdi:loading' : 'mdi:check'}"></ha-icon>
             ${this._saving ? 'Enregistrement…' : 'Enregistrer'}
           </button>
@@ -474,7 +559,7 @@ class SmartIrrigCard extends HTMLElement {
       </div>`;
   }
 
-  _tplSchedule(z) {
+  _tplSchedule(z, next) {
     return `
       <div class="sched-block">
         <div class="sched-time">
@@ -486,6 +571,10 @@ class SmartIrrigCard extends HTMLElement {
             <div class="day-dot${z.scheduleDaysRaw.includes(code) ? ' active' : ''}" title="${DAYS_FULL[i]}">
               ${DAYS_SHORT[i]}
             </div>`).join('')}
+        </div>
+        <div class="sched-next${next.urgent ? ' urgent' : ''}">
+          <ha-icon icon="mdi:calendar-arrow-right"></ha-icon>
+          <span>${next.text}</span>
         </div>
       </div>`;
   }
@@ -519,12 +608,24 @@ class SmartIrrigCard extends HTMLElement {
       </div>`;
   }
 
-  _tplManual() {
+  _tplManual(z) {
+    const dur = z.irrigationDuration;
+    const fr  = z.totalFlowRate;
+    const vol = fr !== null ? Math.round(fr * dur) : null;
+    const volStr = vol !== null
+      ? (vol >= 1000 ? (vol / 1000).toFixed(1) + ' L' : vol + ' mL')
+      : null;
     return `
       <div class="manual-info">
         <ha-icon icon="mdi:information-outline"></ha-icon>
         <span>Mode manuel — déclenchez l'arrosage via le bouton ci-dessous</span>
-      </div>`;
+      </div>
+      ${volStr !== null ? `
+      <div class="info-row">
+        <ha-icon icon="mdi:water-outline"></ha-icon>
+        <span>Volume estimé (${dur} s)</span>
+        <strong>${volStr}</strong>
+      </div>` : ''}`;
   }
 
   _tplWeekly(zones) {
@@ -571,10 +672,13 @@ window.customCards.push({
   documentationURL: 'https://github.com/Hugo22000/smart-irrig_card',
 });
 
+// ── Styles ───────────────────────────────────────────────────────────────────
+
 const STYLES = `
 :host { display: block; }
 ha-card { overflow: hidden; }
 
+/* ── En-tête carte ── */
 .card-header {
   display: flex; align-items: center; gap: 10px;
   padding: 16px 16px 0;
@@ -589,11 +693,13 @@ ha-card { overflow: hidden; }
   color: var(--secondary-text-color);
 }
 
+/* ── Contenu ── */
 .card-content {
   padding: 12px 16px 16px;
   display: flex; flex-direction: column; gap: 12px;
 }
 
+/* ── Zone card ── */
 .zone-card {
   border: 1px solid var(--divider-color, rgba(0,0,0,.12));
   border-radius: 12px; overflow: hidden;
@@ -619,6 +725,7 @@ ha-card { overflow: hidden; }
 }
 .zone-name ha-icon { color: var(--primary-color); }
 
+/* ── Badge mode ── */
 .mode-badge {
   display: flex; align-items: center; gap: 4px;
   font-size: .75em; font-weight: 600;
@@ -628,6 +735,7 @@ ha-card { overflow: hidden; }
 .mode-schedule{ background: rgba(76,175,80,.12);  color: #2e7d32; border: 1px solid rgba(76,175,80,.35); }
 .mode-humidity{ background: rgba(33,150,243,.12); color: #1565c0; border: 1px solid rgba(33,150,243,.35); }
 
+/* ── Bouton icône ── */
 .icon-btn {
   width: 30px; height: 30px; border-radius: 50%;
   border: 1px solid var(--divider-color, rgba(0,0,0,.15));
@@ -638,10 +746,13 @@ ha-card { overflow: hidden; }
   padding: 0;
 }
 .icon-btn:hover:not(:disabled) {
-  background: var(--primary-color); color: white; border-color: var(--primary-color);
+  background: var(--primary-color);
+  color: white;
+  border-color: var(--primary-color);
 }
 .icon-btn.disabled { opacity: .35; cursor: not-allowed; }
 
+/* ── Corps de zone ── */
 .zone-body {
   padding: 12px 14px;
   display: flex; flex-direction: column; gap: 8px;
@@ -653,8 +764,10 @@ ha-card { overflow: hidden; }
 .info-row ha-icon { flex-shrink: 0; color: var(--secondary-text-color); }
 .info-row strong  { margin-left: auto; font-weight: 600; color: var(--primary-text-color); }
 .info-row.urgent  { color: var(--warning-color, #ff9800); }
-.info-row.urgent ha-icon, .info-row.urgent strong { color: var(--warning-color, #ff9800); }
+.info-row.urgent ha-icon,
+.info-row.urgent strong { color: var(--warning-color, #ff9800); }
 
+/* ── Planification ── */
 .sched-block {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   padding-bottom: 10px;
@@ -675,17 +788,23 @@ ha-card { overflow: hidden; }
   border: 1px solid var(--divider-color, rgba(0,0,0,.1));
   cursor: default;
 }
-.day-dot.active { background: var(--primary-color); color: white; border-color: var(--primary-color); }
+.day-dot.active {
+  background: var(--primary-color); color: white; border-color: var(--primary-color);
+}
 .day-dot.clickable { cursor: pointer; transition: transform .1s, box-shadow .1s; }
 .day-dot.clickable:hover { transform: scale(1.15); box-shadow: 0 2px 6px rgba(0,0,0,.2); }
 
+/* ── Humidité ── */
 .hum-block {
   display: flex; flex-direction: column; gap: 8px;
   padding-bottom: 10px;
   border-bottom: 1px solid var(--divider-color, rgba(0,0,0,.06));
 }
 .hum-head { display: flex; align-items: center; gap: 8px; }
-.badge { font-size: .7em; font-weight: 600; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
+.badge {
+  font-size: .7em; font-weight: 600; padding: 2px 8px;
+  border-radius: 10px; white-space: nowrap;
+}
 .badge.warn { background: rgba(255,152,0,.2); color: #e65100; border: 1px solid rgba(255,152,0,.4); }
 .badge.ok   { background: rgba(76,175,80,.2);  color: #2e7d32; border: 1px solid rgba(76,175,80,.4); }
 
@@ -706,6 +825,7 @@ ha-card { overflow: hidden; }
 }
 .no-sensor { font-size: .8em; color: var(--secondary-text-color); font-style: italic; margin: 0; }
 
+/* ── Mode manuel ── */
 .manual-info {
   display: flex; align-items: center; gap: 8px;
   font-size: .85em; color: var(--secondary-text-color); font-style: italic;
@@ -713,6 +833,7 @@ ha-card { overflow: hidden; }
   border-bottom: 1px solid var(--divider-color, rgba(0,0,0,.06));
 }
 
+/* ── Pied de zone ── */
 .zone-foot {
   padding: 10px 14px;
   border-top: 1px solid var(--divider-color, rgba(0,0,0,.08));
@@ -733,8 +854,10 @@ ha-card { overflow: hidden; }
 .trigger-btn:active:not(:disabled), .trigger-btn.pressed { opacity: .7; transform: translateY(0); }
 .trigger-btn:disabled { opacity: .35; cursor: not-allowed; }
 
+/* ── Formulaire d'édition ── */
 .edit-form {
-  padding: 14px; display: flex; flex-direction: column; gap: 14px;
+  padding: 14px;
+  display: flex; flex-direction: column; gap: 14px;
   background: var(--card-background-color);
 }
 .edit-section-title {
@@ -743,7 +866,9 @@ ha-card { overflow: hidden; }
   padding-bottom: 10px;
   border-bottom: 1px solid var(--divider-color, rgba(0,0,0,.08));
 }
-.field-row { display: flex; flex-direction: column; gap: 6px; }
+.field-row {
+  display: flex; flex-direction: column; gap: 6px;
+}
 .field-label {
   font-size: .8em; font-weight: 600; color: var(--secondary-text-color);
   text-transform: uppercase; letter-spacing: .05em;
@@ -760,7 +885,10 @@ ha-card { overflow: hidden; }
 .field-range { width: 100%; accent-color: var(--primary-color); cursor: pointer; }
 .range-val { font-size: .9em; font-weight: 600; color: var(--primary-text-color); min-width: 40px; }
 
-.mode-selector { display: flex; gap: 6px; flex-wrap: wrap; }
+/* Sélecteur de mode */
+.mode-selector {
+  display: flex; gap: 6px; flex-wrap: wrap;
+}
 .mode-sel-btn {
   flex: 1; min-width: 80px;
   display: flex; align-items: center; justify-content: center; gap: 5px;
@@ -770,14 +898,18 @@ ha-card { overflow: hidden; }
   background: var(--secondary-background-color);
   color: var(--secondary-text-color);
   font-size: .8em; font-weight: 500;
-  cursor: pointer; transition: all .15s; font-family: inherit;
+  cursor: pointer; transition: all .15s;
+  font-family: inherit;
 }
 .mode-sel-btn:hover { border-color: var(--primary-color); color: var(--primary-color); }
 .mode-sel-btn.active {
-  background: var(--primary-color); color: var(--text-primary-color, white);
-  border-color: var(--primary-color); font-weight: 600;
+  background: var(--primary-color);
+  color: var(--text-primary-color, white);
+  border-color: var(--primary-color);
+  font-weight: 600;
 }
 
+/* Boutons annuler / sauvegarder */
 .edit-actions {
   display: flex; gap: 8px; justify-content: flex-end;
   padding-top: 6px;
@@ -791,15 +923,97 @@ ha-card { overflow: hidden; }
   transition: opacity .15s, transform .1s;
 }
 .btn-cancel {
-  background: var(--secondary-background-color); color: var(--secondary-text-color);
+  background: var(--secondary-background-color);
+  color: var(--secondary-text-color);
   border: 1px solid var(--divider-color, rgba(0,0,0,.15));
 }
 .btn-cancel:hover { background: var(--divider-color); }
-.btn-save { background: var(--primary-color); color: var(--text-primary-color, white); }
+.btn-save {
+  background: var(--primary-color);
+  color: var(--text-primary-color, white);
+}
 .btn-save:hover:not(:disabled) { opacity: .88; transform: translateY(-1px); }
 .btn-save:disabled, .btn-save.saving { opacity: .6; cursor: not-allowed; }
 
-.weekly { border: 1px solid var(--divider-color, rgba(0,0,0,.1)); border-radius: 12px; overflow: hidden; }
+/* ── Avertissements / erreurs formulaire ── */
+.icon-btn.warn { border-color: var(--warning-color, #ff9800); color: var(--warning-color, #ff9800); }
+.icon-btn.warn:hover { background: var(--warning-color, #ff9800); color: white; border-color: var(--warning-color, #ff9800); }
+
+.edit-warn {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 12px; border-radius: 8px;
+  background: rgba(255,152,0,.1); border: 1px solid rgba(255,152,0,.35);
+  font-size: .85em; color: #b56900; line-height: 1.4;
+}
+.edit-warn ha-icon { color: #ff9800; flex-shrink: 0; margin-top: 2px; }
+
+.edit-error {
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 10px 12px; border-radius: 8px;
+  background: rgba(244,67,54,.1); border: 1px solid rgba(244,67,54,.35);
+  font-size: .85em; color: #c62828; line-height: 1.4;
+}
+.edit-error ha-icon { color: #f44336; flex-shrink: 0; }
+
+/* ── Pompes ── */
+.zone-card.pumping {
+  border-color: var(--primary-color);
+  animation: pulse-pump 2s ease-in-out infinite;
+}
+@keyframes pulse-pump {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(33,150,243,.15), 0 1px 3px rgba(0,0,0,.06); }
+  50%       { box-shadow: 0 0 0 4px rgba(33,150,243,.3),  0 2px 8px rgba(0,0,0,.1);  }
+}
+
+.irrigating-badge {
+  display: flex; align-items: center; gap: 4px;
+  font-size: .72em; font-weight: 600; white-space: nowrap;
+  padding: 3px 8px; border-radius: 10px;
+  background: rgba(33,150,243,.12); color: var(--primary-color);
+  border: 1px solid rgba(33,150,243,.35);
+  animation: blink-badge 1.4s ease-in-out infinite;
+}
+@keyframes blink-badge { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+
+.pump-row {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--divider-color, rgba(0,0,0,.06));
+}
+.pump-chip {
+  display: flex; align-items: center; gap: 4px;
+  font-size: .75em; font-weight: 500;
+  padding: 3px 10px; border-radius: 12px;
+  background: var(--secondary-background-color);
+  color: var(--secondary-text-color);
+  border: 1px solid var(--divider-color, rgba(0,0,0,.12));
+}
+.pump-chip.on {
+  background: rgba(76,175,80,.12); color: #2e7d32;
+  border-color: rgba(76,175,80,.4);
+}
+.pump-chip ha-icon { --mdc-icon-size: 16px; }
+
+/* ── Prochain arrosage (bloc planifié) ── */
+.sched-next {
+  display: flex; align-items: center; gap: 6px;
+  font-size: .82em; color: var(--secondary-text-color);
+  padding-top: 6px; width: 100%;
+}
+.sched-next.urgent { color: var(--warning-color, #ff9800); font-weight: 600; }
+.sched-next ha-icon { flex-shrink: 0; }
+
+/* ── Hint volume dans le formulaire ── */
+.vol-hint {
+  font-size: .8em; font-weight: 600; color: var(--primary-color);
+  padding-top: 2px;
+}
+
+/* ── Vue hebdomadaire ── */
+.weekly {
+  border: 1px solid var(--divider-color, rgba(0,0,0,.1));
+  border-radius: 12px; overflow: hidden;
+}
 .weekly-title {
   display: flex; align-items: center; gap: 8px; padding: 10px 14px;
   font-size: .9em; font-weight: 600; color: var(--primary-text-color);
@@ -808,7 +1022,11 @@ ha-card { overflow: hidden; }
 }
 .weekly-title ha-icon { color: var(--primary-color); }
 .weekly-scroll { overflow-x: auto; padding: 8px; }
-.weekly-grid { display: grid; grid-template-columns: 110px repeat(7, 1fr); gap: 2px; min-width: 420px; }
+
+.weekly-grid {
+  display: grid; grid-template-columns: 110px repeat(7, 1fr);
+  gap: 2px; min-width: 420px;
+}
 .wg-label  { padding: 4px; }
 .wg-day    { text-align: center; font-size: .75em; font-weight: 600; color: var(--secondary-text-color); padding: 4px 2px; border-radius: 4px; }
 .wg-day.today { color: var(--primary-color); font-weight: 700; }
@@ -820,6 +1038,7 @@ ha-card { overflow: hidden; }
 .wg-time   { font-size: .7em; font-weight: 700; color: var(--primary-color); }
 .wg-dot    { color: var(--disabled-text-color, #bdbdbd); font-size: 1.1em; }
 
+/* ── État vide ── */
 .empty {
   display: flex; flex-direction: column; align-items: center;
   padding: 36px 16px; text-align: center;
