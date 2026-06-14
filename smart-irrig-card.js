@@ -161,6 +161,7 @@ class SmartIrrigCard extends HTMLElement {
           irrigating:         st.attributes.irrigating          ?? false,
           pumpSwitches:       st.attributes.pump_switches       ?? [],
           totalFlowRate:      st.attributes.total_flow_rate     ?? null,
+          zoneActive:         st.attributes.zone_active         ?? true,
         };
       })
       .sort((a, b) => a.displayName.localeCompare(b.displayName, 'fr'));
@@ -284,6 +285,31 @@ class SmartIrrigCard extends HTMLElement {
     this._render();
   }
 
+  // ── Toggles zones ────────────────────────────────────────────────────────
+
+  _toggleZone(zone) {
+    if (!zone.entryId) return;
+    this._hass.callService(DOMAIN, SERVICE, {
+      entry_id:            zone.entryId,
+      activation_mode:     zone.mode,
+      irrigation_duration: zone.irrigationDuration,
+      zone_active:         !zone.zoneActive,
+    });
+  }
+
+  _toggleAllZones() {
+    const allActive = this._zones.every(z => z.zoneActive);
+    for (const zone of this._zones) {
+      if (!zone.entryId) continue;
+      this._hass.callService(DOMAIN, SERVICE, {
+        entry_id:            zone.entryId,
+        activation_mode:     zone.mode,
+        irrigation_duration: zone.irrigationDuration,
+        zone_active:         !allActive,
+      });
+    }
+  }
+
   // ── Rendu ────────────────────────────────────────────────────────────────
 
   _render() {
@@ -292,6 +318,8 @@ class SmartIrrigCard extends HTMLElement {
     const { title, show_weekly_view } = this._config;
     const zones = this._zones;
     const schedZones = zones.filter(z => z.mode === 'schedule' && z.scheduleDays.length > 0);
+    const allActive  = zones.length > 0 && zones.every(z => z.zoneActive);
+    const someActive = zones.some(z => z.zoneActive);
 
     this.shadowRoot.innerHTML = `
       <style>${STYLES}</style>
@@ -300,6 +328,13 @@ class SmartIrrigCard extends HTMLElement {
           <ha-icon icon="mdi:sprinkler"></ha-icon>
           <span>${title}</span>
           <span class="count-chip">${zones.length} zone${zones.length !== 1 ? 's' : ''}</span>
+          ${zones.length > 0 ? `
+          <div class="global-toggle-wrap" title="${allActive ? 'Désactiver toutes les zones' : 'Activer toutes les zones'}">
+            <span class="global-toggle-label">Tout</span>
+            <button class="zone-toggle${allActive ? ' on' : someActive ? ' partial' : ''}" data-global-toggle>
+              <div class="zone-toggle-thumb"></div>
+            </button>
+          </div>` : ''}
         </div>
         <div class="card-content">
           ${zones.length === 0 ? this._tplEmpty() : zones.map(z => this._tplZone(z)).join('')}
@@ -330,6 +365,18 @@ class SmartIrrigCard extends HTMLElement {
         }, 3000);
       });
     });
+
+    // Toggles zone active (planifié / humidité)
+    this.shadowRoot.querySelectorAll('[data-zone-toggle]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const z = this._zones.find(z => z.sensorId === btn.dataset.zoneToggle);
+        if (z) this._toggleZone(z);
+      });
+    });
+
+    // Toggle global
+    const globalBtn = this.shadowRoot.querySelector('[data-global-toggle]');
+    if (globalBtn) globalBtn.addEventListener('click', () => this._toggleAllZones());
 
     // Boutons modifier / annuler / sauvegarder
     this.shadowRoot.querySelectorAll('[data-edit]').forEach(btn => {
@@ -429,7 +476,8 @@ class SmartIrrigCard extends HTMLElement {
     const btnDis        = !btn || btn.state === 'unavailable';
     const canEdit       = !!z.entryId;
     const clientActive  = !!this._manualActive[z.sensorId] && Date.now() < this._manualActive[z.sensorId].endTime;
-    const isPumping     = z.irrigating || clientActive;
+    const anyPumpOn     = z.pumpSwitches.some(sw => this._hass.states[sw]?.state === 'on');
+    const isPumping     = z.irrigating || clientActive || anyPumpOn;
 
     return `
       <div class="zone-card${isEditing ? ' editing' : ''}${isPumping ? ' pumping' : ''}">
@@ -453,16 +501,16 @@ class SmartIrrigCard extends HTMLElement {
           </div>
         </div>
 
-        ${isEditing ? this._tplEditForm(z) : this._tplZoneBody(z, next, btn, vol, btnDis, clientActive)}
+        ${isEditing ? this._tplEditForm(z) : this._tplZoneBody(z, next, btn, vol, btnDis, clientActive, anyPumpOn)}
       </div>`;
   }
 
-  _tplZoneBody(z, next, btn, vol, btnDis, clientActive = false) {
+  _tplZoneBody(z, next, btn, vol, btnDis, clientActive = false, anyPumpOn = false) {
     return `
       <div class="zone-body">
         ${z.mode === 'schedule' ? this._tplSchedule(z, next) : ''}
         ${z.mode === 'humidity' ? this._tplHumidity(z) : ''}
-        ${z.mode === 'manual'   ? this._tplManual(z, clientActive) : ''}
+        ${z.mode === 'manual'   ? this._tplManual(z, clientActive, anyPumpOn) : ''}
 
         ${this._tplPumpStatus(z, clientActive)}
 
@@ -475,9 +523,22 @@ class SmartIrrigCard extends HTMLElement {
       </div>
 
       <div class="zone-foot">
-        <button class="trigger-btn" data-trigger="${z.buttonId}" ${btnDis ? 'disabled' : ''}>
-          <ha-icon icon="mdi:water-pump"></ha-icon> Démarrer maintenant
-        </button>
+        ${z.mode === 'manual' ? `
+          <button class="trigger-btn" data-trigger="${z.buttonId}" ${btnDis ? 'disabled' : ''}>
+            <ha-icon icon="mdi:water-pump"></ha-icon> Démarrer maintenant
+          </button>
+        ` : `
+          <div class="zone-active-row">
+            <span class="zone-active-label">
+              <ha-icon icon="${z.zoneActive ? 'mdi:check-circle-outline' : 'mdi:pause-circle-outline'}"></ha-icon>
+              ${z.zoneActive ? 'Automatisation active' : 'Automatisation pausée'}
+            </span>
+            <button class="zone-toggle${z.zoneActive ? ' on' : ''}" data-zone-toggle="${z.sensorId}"
+              title="${z.zoneActive ? 'Désactiver cette zone' : 'Activer cette zone'}">
+              <div class="zone-toggle-thumb"></div>
+            </button>
+          </div>
+        `}
       </div>`;
   }
 
@@ -637,12 +698,12 @@ class SmartIrrigCard extends HTMLElement {
       </div>`;
   }
 
-  _tplManual(z, clientActive = false) {
+  _tplManual(z, clientActive = false, anyPumpOn = false) {
     const dur = z.irrigationDuration;
     const fr  = z.totalFlowRate;
     const vol = fr !== null ? Math.round(fr * dur) : null;
     const volStr = vol !== null
-      ? (vol >= 1000 ? (vol / 1000).toFixed(1) + ' L' : vol + ' mL')
+      ? (vol >= 1000 ? (vol / 1000).toFixed(1) + ' L' : vol + ' mL')
       : null;
 
     if (clientActive) {
@@ -658,6 +719,18 @@ class SmartIrrigCard extends HTMLElement {
           </div>
           <div class="manual-progress-track">
             <div class="manual-progress-fill" style="width:${pct}%"></div>
+          </div>
+          ${volStr !== null ? `<span class="manual-vol-est"><ha-icon icon="mdi:water-outline"></ha-icon> ${volStr} estimés</span>` : ''}
+        </div>`;
+    }
+
+    if (anyPumpOn || z.irrigating) {
+      return `
+        <div class="manual-active">
+          <div class="manual-active-header">
+            <ha-icon icon="mdi:water-pump"></ha-icon>
+            <span>Pompes actives</span>
+            <span class="pump-on-badge">En cours</span>
           </div>
           ${volStr !== null ? `<span class="manual-vol-est"><ha-icon icon="mdi:water-outline"></ha-icon> ${volStr} estimés</span>` : ''}
         </div>`;
@@ -881,6 +954,47 @@ ha-card { overflow: hidden; }
   border-bottom: 1px solid var(--divider-color, rgba(0,0,0,.06));
 }
 
+/* ── Toggle switch zone / global ── */
+.zone-active-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px;
+}
+.zone-active-label {
+  display: flex; align-items: center; gap: 6px;
+  font-size: .875em; font-weight: 500; color: var(--secondary-text-color);
+}
+.zone-active-label ha-icon { --mdc-icon-size: 18px; color: var(--primary-color); }
+
+.zone-toggle {
+  flex-shrink: 0; width: 44px; height: 24px; border-radius: 12px;
+  background: var(--divider-color, #bdbdbd);
+  border: none; cursor: pointer; position: relative;
+  transition: background .25s; padding: 0;
+}
+.zone-toggle.on { background: var(--primary-color); }
+.zone-toggle.partial { background: rgba(var(--rgb-primary-color, 33,150,243),.45); }
+.zone-toggle-thumb {
+  position: absolute; top: 2px; left: 2px;
+  width: 20px; height: 20px; border-radius: 50%;
+  background: white; transition: transform .25s;
+  box-shadow: 0 1px 3px rgba(0,0,0,.3);
+  pointer-events: none;
+}
+.zone-toggle.on .zone-toggle-thumb,
+.zone-toggle.partial .zone-toggle-thumb { transform: translateX(20px); }
+
+/* Toggle global dans l'en-tête */
+.global-toggle-wrap {
+  display: flex; align-items: center; gap: 6px; margin-left: auto;
+}
+.global-toggle-label {
+  font-size: .75em; font-weight: 500; color: var(--secondary-text-color);
+}
+.global-toggle-wrap .zone-toggle { width: 36px; height: 20px; }
+.global-toggle-wrap .zone-toggle-thumb { width: 16px; height: 16px; }
+.global-toggle-wrap .zone-toggle.on .zone-toggle-thumb,
+.global-toggle-wrap .zone-toggle.partial .zone-toggle-thumb { transform: translateX(16px); }
+
 /* ── Arrosage manuel en cours ── */
 .manual-active {
   display: flex; flex-direction: column; gap: 8px;
@@ -913,6 +1027,13 @@ ha-card { overflow: hidden; }
   font-size: .78em; color: var(--secondary-text-color);
 }
 .manual-vol-est ha-icon { --mdc-icon-size: 14px; }
+.pump-on-badge {
+  margin-left: auto; font-size: .78em; font-weight: 700;
+  padding: 2px 8px; border-radius: 10px;
+  background: rgba(76,175,80,.15); color: #2e7d32;
+  border: 1px solid rgba(76,175,80,.4);
+  animation: blink-badge 1.4s ease-in-out infinite;
+}
 
 /* ── Pied de zone ── */
 .zone-foot {
