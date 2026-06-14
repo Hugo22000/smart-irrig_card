@@ -80,6 +80,8 @@ class SmartIrrigCard extends HTMLElement {
     this._pendingEdit = null;
     this._saving      = false;
     this._saveError   = null;
+    this._manualActive  = {}; // sensorId -> { endTime }
+    this._countdownTid  = null;
   }
 
   connectedCallback() {
@@ -88,6 +90,7 @@ class SmartIrrigCard extends HTMLElement {
 
   disconnectedCallback() {
     clearInterval(this._tid);
+    if (this._countdownTid) clearInterval(this._countdownTid);
   }
 
   set hass(hass) {
@@ -150,8 +153,8 @@ class SmartIrrigCard extends HTMLElement {
           mode:              st.attributes.activation_mode || 'manual',
           nextIrrigation:    st.state,
           scheduleTime:      st.attributes.schedule_time   ?? null,
-          scheduleDays:      st.attributes.schedule_days   ?? [],
-          scheduleDaysRaw:   st.attributes.schedule_days_raw ?? [],
+          scheduleDays:      st.attributes.schedule_days   ?? [],     // labels FR
+          scheduleDaysRaw:   st.attributes.schedule_days_raw ?? [],   // codes mon/tue…
           humiditySensor:    st.attributes.humidity_sensor ?? null,
           humidityThreshold: st.attributes.humidity_threshold ?? 40,
           irrigationDuration: st.attributes.irrigation_duration ?? 300,
@@ -196,6 +199,26 @@ class SmartIrrigCard extends HTMLElement {
     } catch {
       return { text: iso, urgent: false };
     }
+  }
+
+  // ── Countdown arrosage manuel ────────────────────────────────────────────
+
+  _startManual(zone) {
+    this._manualActive[zone.sensorId] = { endTime: Date.now() + zone.irrigationDuration * 1000 };
+    if (this._countdownTid) return;
+    this._countdownTid = setInterval(() => {
+      const now = Date.now();
+      let hasActive = false;
+      for (const [id, info] of Object.entries(this._manualActive)) {
+        if (now < info.endTime) hasActive = true;
+        else delete this._manualActive[id];
+      }
+      if (!hasActive) {
+        clearInterval(this._countdownTid);
+        this._countdownTid = null;
+      }
+      this._render();
+    }, 1000);
   }
 
   // ── Actions ──────────────────────────────────────────────────────────────
@@ -297,6 +320,10 @@ class SmartIrrigCard extends HTMLElement {
         this._hass.callService('button', 'press', { entity_id: eid });
         btn.classList.add('pressed');
         btn.innerHTML = '<ha-icon icon="mdi:check"></ha-icon> Démarré';
+
+        const zone = this._zones.find(z => z.buttonId === eid);
+        if (zone && zone.mode === 'manual') this._startManual(zone);
+
         setTimeout(() => {
           btn.classList.remove('pressed');
           btn.innerHTML = '<ha-icon icon="mdi:water-pump"></ha-icon> Démarrer maintenant';
@@ -346,7 +373,7 @@ class SmartIrrigCard extends HTMLElement {
       });
     });
 
-    // Inputs directs
+    // Inputs directs (heure, seuil, durée)
     const bindInput = (sel, field, transform = v => v) => {
       const el = this.shadowRoot.querySelector(sel);
       if (el) el.addEventListener('input', () => {
@@ -394,23 +421,25 @@ class SmartIrrigCard extends HTMLElement {
   }
 
   _tplZone(z) {
-    const isEditing = this._editingId === z.sensorId;
-    const mc        = MODE_CFG[z.mode] ?? MODE_CFG.manual;
-    const next      = this._formatNext(z.nextIrrigation);
-    const btn       = this._hass.states[z.buttonId];
-    const vol       = this._hass.states[z.volumeId];
-    const btnDis    = !btn || btn.state === 'unavailable';
-    const canEdit   = !!z.entryId;
+    const isEditing     = this._editingId === z.sensorId;
+    const mc            = MODE_CFG[z.mode] ?? MODE_CFG.manual;
+    const next          = this._formatNext(z.nextIrrigation);
+    const btn           = this._hass.states[z.buttonId];
+    const vol           = this._hass.states[z.volumeId];
+    const btnDis        = !btn || btn.state === 'unavailable';
+    const canEdit       = !!z.entryId;
+    const clientActive  = !!this._manualActive[z.sensorId] && Date.now() < this._manualActive[z.sensorId].endTime;
+    const isPumping     = z.irrigating || clientActive;
 
     return `
-      <div class="zone-card${isEditing ? ' editing' : ''}${z.irrigating ? ' pumping' : ''}">
+      <div class="zone-card${isEditing ? ' editing' : ''}${isPumping ? ' pumping' : ''}">
         <div class="zone-head">
           <div class="zone-name">
             <ha-icon icon="mdi:sprinkler-variant"></ha-icon>
             <span>${z.displayName}</span>
           </div>
           <div style="display:flex;align-items:center;gap:8px">
-            ${z.irrigating ? `<span class="irrigating-badge"><ha-icon icon="mdi:water-pump"></ha-icon> Arrosage</span>` : ''}
+            ${isPumping ? `<span class="irrigating-badge"><ha-icon icon="mdi:water-pump"></ha-icon> Arrosage</span>` : ''}
             <div class="mode-badge ${mc.css}">
               <ha-icon icon="${mc.icon}"></ha-icon>
               <span>${mc.label}</span>
@@ -424,18 +453,18 @@ class SmartIrrigCard extends HTMLElement {
           </div>
         </div>
 
-        ${isEditing ? this._tplEditForm(z) : this._tplZoneBody(z, next, btn, vol, btnDis)}
+        ${isEditing ? this._tplEditForm(z) : this._tplZoneBody(z, next, btn, vol, btnDis, clientActive)}
       </div>`;
   }
 
-  _tplZoneBody(z, next, btn, vol, btnDis) {
+  _tplZoneBody(z, next, btn, vol, btnDis, clientActive = false) {
     return `
       <div class="zone-body">
         ${z.mode === 'schedule' ? this._tplSchedule(z, next) : ''}
         ${z.mode === 'humidity' ? this._tplHumidity(z) : ''}
-        ${z.mode === 'manual'   ? this._tplManual(z)   : ''}
+        ${z.mode === 'manual'   ? this._tplManual(z, clientActive) : ''}
 
-        ${this._tplPumpStatus(z)}
+        ${this._tplPumpStatus(z, clientActive)}
 
         ${vol && vol.state !== 'unavailable' ? `
         <div class="info-row">
@@ -452,11 +481,11 @@ class SmartIrrigCard extends HTMLElement {
       </div>`;
   }
 
-  _tplPumpStatus(z) {
+  _tplPumpStatus(z, clientActive = false) {
     if (!z.pumpSwitches.length) return '';
     const chips = z.pumpSwitches.map((sw) => {
       const st   = this._hass.states[sw];
-      const on   = st && st.state === 'on';
+      const on   = (st && st.state === 'on') || clientActive;
       const name = (st && st.attributes.friendly_name) || sw;
       return `<div class="pump-chip${on ? ' on' : ''}" title="${sw}">
         <ha-icon icon="${on ? 'mdi:pump' : 'mdi:pump-off'}"></ha-icon>
@@ -608,13 +637,32 @@ class SmartIrrigCard extends HTMLElement {
       </div>`;
   }
 
-  _tplManual(z) {
+  _tplManual(z, clientActive = false) {
     const dur = z.irrigationDuration;
     const fr  = z.totalFlowRate;
     const vol = fr !== null ? Math.round(fr * dur) : null;
     const volStr = vol !== null
-      ? (vol >= 1000 ? (vol / 1000).toFixed(1) + ' L' : vol + ' mL')
+      ? (vol >= 1000 ? (vol / 1000).toFixed(1) + ' L' : vol + ' mL')
       : null;
+
+    if (clientActive) {
+      const info      = this._manualActive[z.sensorId];
+      const remaining = Math.max(0, Math.ceil((info.endTime - Date.now()) / 1000));
+      const pct       = Math.round((remaining / dur) * 100);
+      return `
+        <div class="manual-active">
+          <div class="manual-active-header">
+            <ha-icon icon="mdi:water-pump"></ha-icon>
+            <span>Arrosage en cours…</span>
+            <span class="manual-countdown">${remaining} s</span>
+          </div>
+          <div class="manual-progress-track">
+            <div class="manual-progress-fill" style="width:${pct}%"></div>
+          </div>
+          ${volStr !== null ? `<span class="manual-vol-est"><ha-icon icon="mdi:water-outline"></ha-icon> ${volStr} estimés</span>` : ''}
+        </div>`;
+    }
+
     return `
       <div class="manual-info">
         <ha-icon icon="mdi:information-outline"></ha-icon>
@@ -832,6 +880,39 @@ ha-card { overflow: hidden; }
   padding-bottom: 10px;
   border-bottom: 1px solid var(--divider-color, rgba(0,0,0,.06));
 }
+
+/* ── Arrosage manuel en cours ── */
+.manual-active {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 12px; border-radius: 8px;
+  background: rgba(33,150,243,.08); border: 1px solid rgba(33,150,243,.3);
+  margin-bottom: 2px;
+}
+.manual-active-header {
+  display: flex; align-items: center; gap: 8px;
+  font-size: .875em; font-weight: 600; color: var(--primary-color);
+}
+.manual-active-header ha-icon { --mdc-icon-size: 18px; animation: spin-pump .9s linear infinite; }
+@keyframes spin-pump { to { transform: rotate(360deg); } }
+.manual-countdown {
+  margin-left: auto; font-size: 1.1em; font-weight: 700;
+  color: var(--primary-color); font-variant-numeric: tabular-nums;
+}
+.manual-progress-track {
+  height: 6px; border-radius: 3px;
+  background: var(--secondary-background-color);
+  border: 1px solid rgba(33,150,243,.2); overflow: hidden;
+}
+.manual-progress-fill {
+  height: 100%; border-radius: 3px;
+  background: linear-gradient(90deg, var(--primary-color), #42a5f5);
+  transition: width .95s linear;
+}
+.manual-vol-est {
+  display: flex; align-items: center; gap: 4px;
+  font-size: .78em; color: var(--secondary-text-color);
+}
+.manual-vol-est ha-icon { --mdc-icon-size: 14px; }
 
 /* ── Pied de zone ── */
 .zone-foot {
