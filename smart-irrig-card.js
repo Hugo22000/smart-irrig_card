@@ -162,6 +162,7 @@ class SmartIrrigCard extends HTMLElement {
           pumpSwitches:       st.attributes.pump_switches       ?? [],
           totalFlowRate:      st.attributes.total_flow_rate     ?? null,
           zoneActive:         st.attributes.zone_active         ?? true,
+          pumpsAvailable:     st.attributes.pumps_available     ?? null,
         };
       })
       .sort((a, b) => a.displayName.localeCompare(b.displayName, 'fr'));
@@ -473,21 +474,23 @@ class SmartIrrigCard extends HTMLElement {
     const next          = this._formatNext(z.nextIrrigation);
     const btn           = this._hass.states[z.buttonId];
     const vol           = this._hass.states[z.volumeId];
-    const btnDis        = !btn || btn.state === 'unavailable';
+    const pumpsUnavailable = z.pumpsAvailable === false;
+    const btnDis        = !btn || btn.state === 'unavailable' || pumpsUnavailable;
     const canEdit       = !!z.entryId;
     const clientActive  = !!this._manualActive[z.sensorId] && Date.now() < this._manualActive[z.sensorId].endTime;
     const anyPumpOn     = z.pumpSwitches.some(sw => this._hass.states[sw]?.state === 'on');
     const isPumping     = z.irrigating || clientActive || anyPumpOn;
 
     return `
-      <div class="zone-card${isEditing ? ' editing' : ''}${isPumping ? ' pumping' : ''}">
+      <div class="zone-card${isEditing ? ' editing' : ''}${isPumping ? ' pumping' : ''}${pumpsUnavailable ? ' offline' : ''}">
         <div class="zone-head">
           <div class="zone-name">
             <ha-icon icon="mdi:sprinkler-variant"></ha-icon>
             <span>${z.displayName}</span>
           </div>
           <div style="display:flex;align-items:center;gap:8px">
-            ${isPumping ? `<span class="irrigating-badge"><ha-icon icon="mdi:water-pump"></ha-icon> Arrosage</span>` : ''}
+            ${pumpsUnavailable ? `<span class="offline-badge"><ha-icon icon="mdi:wifi-off"></ha-icon> Hors ligne</span>` : ''}
+            ${isPumping && !pumpsUnavailable ? `<span class="irrigating-badge"><ha-icon icon="mdi:water-pump"></ha-icon> Arrosage</span>` : ''}
             <div class="mode-badge ${mc.css}">
               <ha-icon icon="${mc.icon}"></ha-icon>
               <span>${mc.label}</span>
@@ -501,18 +504,18 @@ class SmartIrrigCard extends HTMLElement {
           </div>
         </div>
 
-        ${isEditing ? this._tplEditForm(z) : this._tplZoneBody(z, next, btn, vol, btnDis, clientActive, anyPumpOn)}
+        ${isEditing ? this._tplEditForm(z) : this._tplZoneBody(z, next, btn, vol, btnDis, clientActive, anyPumpOn, pumpsUnavailable)}
       </div>`;
   }
 
-  _tplZoneBody(z, next, btn, vol, btnDis, clientActive = false, anyPumpOn = false) {
+  _tplZoneBody(z, next, btn, vol, btnDis, clientActive = false, anyPumpOn = false, pumpsUnavailable = false) {
     return `
       <div class="zone-body">
         ${z.mode === 'schedule' ? this._tplSchedule(z, next) : ''}
         ${z.mode === 'humidity' ? this._tplHumidity(z) : ''}
         ${z.mode === 'manual'   ? this._tplManual(z, clientActive, anyPumpOn) : ''}
 
-        ${this._tplPumpStatus(z, clientActive)}
+        ${this._tplPumpStatus(z, clientActive, pumpsUnavailable)}
 
         ${vol && vol.state !== 'unavailable' ? `
         <div class="info-row">
@@ -524,6 +527,11 @@ class SmartIrrigCard extends HTMLElement {
 
       <div class="zone-foot">
         ${z.mode === 'manual' ? `
+          ${pumpsUnavailable ? `
+          <div class="pump-offline-banner">
+            <ha-icon icon="mdi:wifi-off"></ha-icon>
+            <span>ESP32 hors ligne — arrosage indisponible</span>
+          </div>` : ''}
           <button class="trigger-btn" data-trigger="${z.buttonId}" ${btnDis ? 'disabled' : ''}>
             <ha-icon icon="mdi:water-pump"></ha-icon> Démarrer maintenant
           </button>
@@ -542,7 +550,20 @@ class SmartIrrigCard extends HTMLElement {
       </div>`;
   }
 
-  _tplPumpStatus(z, clientActive = false) {
+  _tplPumpStatus(z, clientActive = false, pumpsUnavailable = false) {
+    if (!z.pumpSwitches.length && z.pumpsAvailable === null) return '';
+    if (pumpsUnavailable) {
+      const chips = z.pumpSwitches.length
+        ? z.pumpSwitches.map(sw => {
+            const name = this._hass.states[sw]?.attributes.friendly_name || sw;
+            return `<div class="pump-chip offline" title="${sw}">
+              <ha-icon icon="mdi:pump-off"></ha-icon>
+              ${name}
+            </div>`;
+          }).join('')
+        : `<div class="pump-chip offline"><ha-icon icon="mdi:pump-off"></ha-icon> Pompe(s) hors ligne</div>`;
+      return `<div class="pump-row">${chips}</div>`;
+    }
     if (!z.pumpSwitches.length) return '';
     const chips = z.pumpSwitches.map((sw) => {
       const st   = this._hass.states[sw];
@@ -1194,7 +1215,31 @@ ha-card { overflow: hidden; }
   background: rgba(76,175,80,.12); color: #2e7d32;
   border-color: rgba(76,175,80,.4);
 }
+.pump-chip.offline {
+  background: rgba(244,67,54,.08); color: #c62828;
+  border-color: rgba(244,67,54,.3);
+}
 .pump-chip ha-icon { --mdc-icon-size: 16px; }
+
+/* ── Zone hors ligne ── */
+.zone-card.offline {
+  border-color: rgba(244,67,54,.5);
+  opacity: .85;
+}
+.offline-badge {
+  display: flex; align-items: center; gap: 4px;
+  font-size: .72em; font-weight: 600; white-space: nowrap;
+  padding: 3px 8px; border-radius: 10px;
+  background: rgba(244,67,54,.12); color: #c62828;
+  border: 1px solid rgba(244,67,54,.35);
+}
+.pump-offline-banner {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border-radius: 6px; margin-bottom: 6px;
+  background: rgba(244,67,54,.08); border: 1px solid rgba(244,67,54,.25);
+  font-size: .82em; color: #c62828;
+}
+.pump-offline-banner ha-icon { --mdc-icon-size: 16px; flex-shrink: 0; }
 
 /* ── Prochain arrosage (bloc planifié) ── */
 .sched-next {
