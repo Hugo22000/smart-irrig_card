@@ -450,7 +450,7 @@ class SmartIrrigCard extends HTMLElement {
         if (!this._pendingEdit) return;
         this._pendingEdit.irrigationDuration = Number(durEl.value);
         if (volHint && editingZone && editingZone.totalFlowRate !== null) {
-          const v = Math.round(editingZone.totalFlowRate * Number(durEl.value));
+          const v = Math.round(editingZone.totalFlowRate * Number(durEl.value) / 6);
           volHint.textContent = '≈ ' + (v >= 1000 ? (v / 1000).toFixed(1) + ' L' : v + ' mL');
         }
       });
@@ -621,7 +621,7 @@ class SmartIrrigCard extends HTMLElement {
             value="${ed.irrigationDuration}" />
           ${z.totalFlowRate !== null ? `
           <span class="vol-hint" id="vol-hint">≈ ${(() => {
-            const v = Math.round(z.totalFlowRate * ed.irrigationDuration);
+            const v = Math.round(z.totalFlowRate * ed.irrigationDuration / 6);
             return v >= 1000 ? (v / 1000).toFixed(1) + ' L' : v + ' mL';
           })()}</span>` : ''}
         </div>
@@ -722,7 +722,7 @@ class SmartIrrigCard extends HTMLElement {
   _tplManual(z, clientActive = false, anyPumpOn = false) {
     const dur = z.irrigationDuration;
     const fr  = z.totalFlowRate;
-    const vol = fr !== null ? Math.round(fr * dur) : null;
+    const vol = fr !== null ? Math.round(fr * dur / 6) : null;
     const volStr = vol !== null
       ? (vol >= 1000 ? (vol / 1000).toFixed(1) + ' L' : vol + ' mL')
       : null;
