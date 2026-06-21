@@ -147,6 +147,7 @@ class SmartIrrigCard extends HTMLElement {
         return {
           sensorId:          id,
           buttonId:          `button.${base}_start_irrigation`,
+          stopButtonId:      `button.${base}_stop_irrigation`,
           volumeId:          `sensor.${base}_water_volume`,
           displayName,
           entryId:           st.attributes.entry_id ?? null,
@@ -367,6 +368,25 @@ class SmartIrrigCard extends HTMLElement {
       });
     });
 
+    // Arrêt manuel
+    this.shadowRoot.querySelectorAll('[data-stop]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const eid = btn.dataset.stop;
+        if (this._hass.states[eid]) {
+          this._hass.callService('button', 'press', { entity_id: eid });
+        }
+        const zone = this._zones.find(z => z.stopButtonId === eid);
+        if (zone) {
+          delete this._manualActive[zone.sensorId];
+          if (!Object.keys(this._manualActive).length && this._countdownTid) {
+            clearInterval(this._countdownTid);
+            this._countdownTid = null;
+          }
+        }
+        this._render();
+      });
+    });
+
     // Toggles zone active (planifié / humidité)
     this.shadowRoot.querySelectorAll('[data-zone-toggle]').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -532,9 +552,15 @@ class SmartIrrigCard extends HTMLElement {
             <ha-icon icon="mdi:wifi-off"></ha-icon>
             <span>ESP32 hors ligne — arrosage indisponible</span>
           </div>` : ''}
-          <button class="trigger-btn" data-trigger="${z.buttonId}" ${btnDis ? 'disabled' : ''}>
-            <ha-icon icon="mdi:water-pump"></ha-icon> Démarrer maintenant
-          </button>
+          <div class="foot-btn-row">
+            <button class="trigger-btn" data-trigger="${z.buttonId}" ${btnDis ? 'disabled' : ''}>
+              <ha-icon icon="mdi:water-pump"></ha-icon> Démarrer
+            </button>
+            <button class="stop-btn" data-stop="${z.stopButtonId}" ${!isPumping ? 'disabled' : ''}
+              title="Arrêter l'arrosage">
+              <ha-icon icon="mdi:stop-circle-outline"></ha-icon> Arrêter
+            </button>
+          </div>
         ` : `
           <div class="zone-active-row">
             <span class="zone-active-label">
@@ -1062,8 +1088,11 @@ ha-card { overflow: hidden; }
   border-top: 1px solid var(--divider-color, rgba(0,0,0,.08));
   background: var(--secondary-background-color);
 }
+.foot-btn-row {
+  display: flex; gap: 8px;
+}
 .trigger-btn {
-  width: 100%; display: flex; align-items: center; justify-content: center; gap: 8px;
+  flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px;
   padding: 9px 16px;
   background: var(--primary-color); color: var(--text-primary-color, #fff);
   border: none; border-radius: 8px;
@@ -1071,6 +1100,19 @@ ha-card { overflow: hidden; }
   cursor: pointer; transition: opacity .2s, transform .1s, box-shadow .15s;
   font-family: inherit;
 }
+.stop-btn {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 9px 14px;
+  background: rgba(244,67,54,.1); color: #c62828;
+  border: 1px solid rgba(244,67,54,.35); border-radius: 8px;
+  font-size: .875em; font-weight: 600;
+  cursor: pointer; transition: opacity .2s, background .15s;
+  font-family: inherit; white-space: nowrap;
+}
+.stop-btn:hover:not(:disabled) {
+  background: rgba(244,67,54,.2);
+}
+.stop-btn:disabled { opacity: .3; cursor: not-allowed; }
 .trigger-btn:hover:not(:disabled) {
   opacity: .88; transform: translateY(-1px); box-shadow: 0 3px 8px rgba(0,0,0,.2);
 }
