@@ -529,6 +529,7 @@ class SmartIrrigCard extends HTMLElement {
   }
 
   _tplZoneBody(z, next, btn, vol, btnDis, clientActive = false, anyPumpOn = false, pumpsUnavailable = false) {
+    const isPumping = z.irrigating || clientActive || anyPumpOn;
     return `
       <div class="zone-body">
         ${z.mode === 'schedule' ? this._tplSchedule(z, next) : ''}
