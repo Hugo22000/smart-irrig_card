@@ -185,6 +185,10 @@ class SmartIrrigCard extends HTMLElement {
       const diffDay  = Math.floor(diffMs / 86_400_000);
 
       if (diffMs < 0)    return { text: 'En cours…', urgent: true };
+      if (diffMs < 60_000) {
+        const sec = Math.ceil(diffMs / 1000);
+        return { text: `Dans ${sec} s`, urgent: true };
+      }
       if (diffMin < 60)  return { text: `Dans ${diffMin} min`, urgent: true };
       if (diffHour < 24) {
         const m = diffMin % 60;
@@ -346,6 +350,15 @@ class SmartIrrigCard extends HTMLElement {
     `;
 
     this._bindEvents();
+
+    // Passer à 1s si un arrosage planifié est imminent (< 60s)
+    const hasImminent = zones.some(z => {
+      if (z.mode !== 'schedule' || !z.zoneActive) return false;
+      const diff = new Date(z.nextIrrigation) - Date.now();
+      return diff > 0 && diff < 60_000;
+    });
+    clearInterval(this._tid);
+    this._tid = setInterval(() => this._render(), hasImminent ? 1_000 : 60_000);
   }
 
   _bindEvents() {
