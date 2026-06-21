@@ -563,7 +563,11 @@ class SmartIrrigCard extends HTMLElement {
             </button>
           </div>
         ` : `
-          <div class="zone-active-row">
+          ${isPumping ? `
+          <button class="stop-btn stop-btn-full" data-stop="${z.stopButtonId}" title="Arrêter l'arrosage">
+            <ha-icon icon="mdi:stop-circle-outline"></ha-icon> Arrêter l'arrosage en cours
+          </button>` : ''}
+          <div class="zone-active-row${isPumping ? ' with-stop' : ''}">
             <span class="zone-active-label">
               <ha-icon icon="${z.zoneActive ? 'mdi:check-circle-outline' : 'mdi:pause-circle-outline'}"></ha-icon>
               ${z.zoneActive ? 'Automatisation active' : 'Automatisation pausée'}
@@ -1114,6 +1118,14 @@ ha-card { overflow: hidden; }
   background: rgba(244,67,54,.2);
 }
 .stop-btn:disabled { opacity: .3; cursor: not-allowed; }
+.stop-btn-full {
+  width: 100%; margin-bottom: 8px;
+  border-top: none;
+}
+.zone-active-row.with-stop {
+  border-top: 1px solid var(--divider-color, rgba(0,0,0,.08));
+  padding-top: 8px; margin-top: 0;
+}
 .trigger-btn:hover:not(:disabled) {
   opacity: .88; transform: translateY(-1px); box-shadow: 0 3px 8px rgba(0,0,0,.2);
 }
